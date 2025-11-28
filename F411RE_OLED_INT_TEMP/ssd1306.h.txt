@@ -1,0 +1,71 @@
+/*
+ * ssd1306.h
+ *
+ * Minimal SSD1306 OLED driver for STM32 HAL (I2C)
+ * Target: NUCLEO-F411RE (or any STM32 with HAL/I2C)
+ *
+ * Features:
+ *  - 128x64 monochrome framebuffer (SSD1306)
+ *  - Basic init sequence (I2C)
+ *  - Framebuffer functions: Clear, Fill, DrawPixel, UpdateScreen
+ *  - Simple text rendering (5x7 font) with WriteChar / WriteString
+ *
+ * Usage:
+ *  - Configure I2C (e.g. I2C1) in CubeMX: SCL/SDA pins, timing, etc.
+ *  - Expose the I2C handle variable (default: hi2c1) in your project.
+ *  - Optionally define pins for hardware reset:
+ *      #define SSD1306_RST_GPIO_Port GPIOB
+ *      #define SSD1306_RST_Pin       GPIO_PIN_0
+ *    (If not defined, the driver will skip hardware reset.)
+ *
+ *  - In your code:
+ *      extern I2C_HandleTypeDef hi2c1;    // or change SSD1306_I2C_HANDLE macro
+ *      SSD1306_Init();
+ *      SSD1306_Clear();
+ *      SSD1306_WriteString(0, 0, "Hello");
+ *      SSD1306_UpdateScreen();
+ */
+
+#ifndef INC_SSD1306_H_
+#define INC_SSD1306_H_
+
+#include "stm32f4xx_hal.h"
+#include <stdint.h>
+#include <stddef.h>
+
+/* Display resolution */
+#define SSD1306_WIDTH  128
+#define SSD1306_HEIGHT 64
+
+/* Default I2C handle (declare extern in your project) */
+#ifndef SSD1306_I2C_HANDLE
+#define SSD1306_I2C_HANDLE hi2c1
+#endif
+
+/* Default 7-bit I2C address (common SSD1306 modules) */
+#ifndef SSD1306_I2C_ADDR
+#define SSD1306_I2C_ADDR 0x3C
+#endif
+
+/* Optional hardware reset pin: define these in your project if present */
+#ifndef SSD1306_RST_GPIO_Port
+/* leave undefined to skip hardware reset */
+#endif
+
+/* Public API */
+extern I2C_HandleTypeDef SSD1306_I2C_HANDLE;
+
+void SSD1306_Init(void);
+void SSD1306_UpdateScreen(void);
+void SSD1306_Fill(uint8_t color); /* color: 0 = off, 1 = on */
+void SSD1306_Clear(void);
+void SSD1306_DrawPixel(uint8_t x, uint8_t y, uint8_t color);
+void SSD1306_DrawBitmap(const uint8_t *bitmap);
+void SSD1306_InvertDisplay(uint8_t invert);
+void SSD1306_SetContrast(uint8_t contrast);
+
+/* Text helpers (font is 5x7) */
+void SSD1306_WriteChar(uint8_t x, uint8_t y, char ch, uint8_t color);
+void SSD1306_WriteString(uint8_t x, uint8_t y, const char* str, uint8_t color);
+
+#endif /* INC_SSD1306_H_ */

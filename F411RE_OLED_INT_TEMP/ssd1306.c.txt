@@ -1,0 +1,311 @@
+/*
+ * ssd1306.c
+ *
+ * Minimal SSD1306 OLED driver (I2C) using STM32 HAL.
+ * - Blocking (HAL_I2C_Master_Transmit)
+ * - 128x64 framebuffer (1KB)
+ *
+ * Notes:
+ *  - Ensure the I2C handle (hi2c1 or override) is configured in CubeMX.
+ *  - If you have a hardware reset pin, define SSD1306_RST_GPIO_Port and
+ *    SSD1306_RST_Pin in your project before including ssd1306.h.
+ */
+
+#include "ssd1306.h"
+#include <string.h>
+
+/* Extern I2C handle (user must provide in their project) */
+extern I2C_HandleTypeDef SSD1306_I2C_HANDLE;
+
+/* SSD1306 control bytes */
+#define SSD1306_CONTROL_CMD  0x00
+#define SSD1306_CONTROL_DATA 0x40
+
+/* I2C address for HAL functions: HAL expects 7-bit << 1 when using older APIs.
+   We'll shift here to be safe when calling HAL_I2C_Master_Transmit. */
+#define SSD1306_I2C_ADDR8 (SSD1306_I2C_ADDR << 1)
+
+/* Framebuffer: 128 x 64 / 8 = 1024 bytes */
+static uint8_t SSD1306_Buffer[SSD1306_WIDTH * SSD1306_HEIGHT / 8];
+
+/* Small timeout for HAL transfers */
+#define SSD1306_I2C_TIMEOUT  100
+
+/* Font 5x7 for basic ASCII (32..127) */
+static const uint8_t Font5x7[][5] = {
+    /* Basic 96 characters (space..DEL). Each char 5 bytes. */
+    /* Space (32) */
+    {0x00,0x00,0x00,0x00,0x00}, /* ' ' */
+    {0x00,0x00,0x5F,0x00,0x00}, /* '!' */
+    {0x00,0x07,0x00,0x07,0x00}, /* '"' */
+    {0x14,0x7F,0x14,0x7F,0x14}, /* '#' */
+    {0x24,0x2A,0x7F,0x2A,0x12}, /* '$' */
+    {0x23,0x13,0x08,0x64,0x62}, /* '%' */
+    {0x36,0x49,0x55,0x22,0x50}, /* '&' */
+    {0x00,0x05,0x03,0x00,0x00}, /* ''' */
+    {0x00,0x1C,0x22,0x41,0x00}, /* '(' */
+    {0x00,0x41,0x22,0x1C,0x00}, /* ')' */
+    {0x14,0x08,0x3E,0x08,0x14}, /* '*' */
+    {0x08,0x08,0x3E,0x08,0x08}, /* '+' */
+    {0x00,0x50,0x30,0x00,0x00}, /* ',' */
+    {0x08,0x08,0x08,0x08,0x08}, /* '-' */
+    {0x00,0x60,0x60,0x00,0x00}, /* '.' */
+    {0x20,0x10,0x08,0x04,0x02}, /* '/' */
+    {0x3E,0x51,0x49,0x45,0x3E}, /* '0' */
+    {0x00,0x42,0x7F,0x40,0x00}, /* '1' */
+    {0x42,0x61,0x51,0x49,0x46}, /* '2' */
+    {0x21,0x41,0x45,0x4B,0x31}, /* '3' */
+    {0x18,0x14,0x12,0x7F,0x10}, /* '4' */
+    {0x27,0x45,0x45,0x45,0x39}, /* '5' */
+    {0x3C,0x4A,0x49,0x49,0x30}, /* '6' */
+    {0x01,0x71,0x09,0x05,0x03}, /* '7' */
+    {0x36,0x49,0x49,0x49,0x36}, /* '8' */
+    {0x06,0x49,0x49,0x29,0x1E}, /* '9' */
+    {0x00,0x36,0x36,0x00,0x00}, /* ':' */
+    {0x00,0x56,0x36,0x00,0x00}, /* ';' */
+    {0x08,0x14,0x22,0x41,0x00}, /* '<' */
+    {0x14,0x14,0x14,0x14,0x14}, /* '=' */
+    {0x00,0x41,0x22,0x14,0x08}, /* '>' */
+    {0x02,0x01,0x51,0x09,0x06}, /* '?' */
+    {0x32,0x49,0x79,0x41,0x3E}, /* '@' */
+    {0x7E,0x11,0x11,0x11,0x7E}, /* 'A' */
+    {0x7F,0x49,0x49,0x49,0x36}, /* 'B' */
+    {0x3E,0x41,0x41,0x41,0x22}, /* 'C' */
+    {0x7F,0x41,0x41,0x22,0x1C}, /* 'D' */
+    {0x7F,0x49,0x49,0x49,0x41}, /* 'E' */
+    {0x7F,0x09,0x09,0x09,0x01}, /* 'F' */
+    {0x3E,0x41,0x49,0x49,0x7A}, /* 'G' */
+    {0x7F,0x08,0x08,0x08,0x7F}, /* 'H' */
+    {0x00,0x41,0x7F,0x41,0x00}, /* 'I' */
+    {0x20,0x40,0x41,0x3F,0x01}, /* 'J' */
+    {0x7F,0x08,0x14,0x22,0x41}, /* 'K' */
+    {0x7F,0x40,0x40,0x40,0x40}, /* 'L' */
+    {0x7F,0x02,0x0C,0x02,0x7F}, /* 'M' */
+    {0x7F,0x04,0x08,0x10,0x7F}, /* 'N' */
+    {0x3E,0x41,0x41,0x41,0x3E}, /* 'O' */
+    {0x7F,0x09,0x09,0x09,0x06}, /* 'P' */
+    {0x3E,0x41,0x51,0x21,0x5E}, /* 'Q' */
+    {0x7F,0x09,0x19,0x29,0x46}, /* 'R' */
+    {0x46,0x49,0x49,0x49,0x31}, /* 'S' */
+    {0x01,0x01,0x7F,0x01,0x01}, /* 'T' */
+    {0x3F,0x40,0x40,0x40,0x3F}, /* 'U' */
+    {0x1F,0x20,0x40,0x20,0x1F}, /* 'V' */
+    {0x3F,0x40,0x38,0x40,0x3F}, /* 'W' */
+    {0x63,0x14,0x08,0x14,0x63}, /* 'X' */
+    {0x07,0x08,0x70,0x08,0x07}, /* 'Y' */
+    {0x61,0x51,0x49,0x45,0x43}, /* 'Z' */
+    {0x00,0x7F,0x41,0x41,0x00}, /* '[' */
+    {0x02,0x04,0x08,0x10,0x20}, /* '\' */
+    {0x00,0x41,0x41,0x7F,0x00}, /* ']' */
+    {0x04,0x02,0x01,0x02,0x04}, /* '^' */
+    {0x80,0x80,0x80,0x80,0x80}, /* '_' */
+    {0x00,0x03,0x05,0x00,0x00}, /* '`' */
+    {0x20,0x54,0x54,0x54,0x78}, /* 'a' */
+    {0x7F,0x48,0x44,0x44,0x38}, /* 'b' */
+    {0x38,0x44,0x44,0x44,0x20}, /* 'c' */
+    {0x38,0x44,0x44,0x48,0x7F}, /* 'd' */
+    {0x38,0x54,0x54,0x54,0x18}, /* 'e' */
+    {0x08,0x7E,0x09,0x01,0x02}, /* 'f' */
+    {0x0C,0x52,0x52,0x52,0x3E}, /* 'g' */
+    {0x7F,0x08,0x04,0x04,0x78}, /* 'h' */
+    {0x00,0x44,0x7D,0x40,0x00}, /* 'i' */
+    {0x20,0x40,0x44,0x3D,0x00}, /* 'j' */
+    {0x7F,0x10,0x28,0x44,0x00}, /* 'k' */
+    {0x00,0x41,0x7F,0x40,0x00}, /* 'l' */
+    {0x7C,0x04,0x18,0x04,0x78}, /* 'm' */
+    {0x7C,0x08,0x04,0x04,0x78}, /* 'n' */
+    {0x38,0x44,0x44,0x44,0x38}, /* 'o' */
+    {0x7C,0x14,0x14,0x14,0x08}, /* 'p' */
+    {0x08,0x14,0x14,0x18,0x7C}, /* 'q' */
+    {0x7C,0x08,0x04,0x04,0x08}, /* 'r' */
+    {0x48,0x54,0x54,0x54,0x20}, /* 's' */
+    {0x04,0x3F,0x44,0x40,0x20}, /* 't' */
+    {0x3C,0x40,0x40,0x20,0x7C}, /* 'u' */
+    {0x1C,0x20,0x40,0x20,0x1C}, /* 'v' */
+    {0x3C,0x40,0x30,0x40,0x3C}, /* 'w' */
+    {0x44,0x28,0x10,0x28,0x44}, /* 'x' */
+    {0x0C,0x50,0x50,0x50,0x3C}, /* 'y' */
+    {0x44,0x64,0x54,0x4C,0x44}, /* 'z' */
+    {0x00,0x08,0x36,0x41,0x00}, /* '{' */
+    {0x00,0x00,0x7F,0x00,0x00}, /* '|' */
+    {0x00,0x41,0x36,0x08,0x00}, /* '}' */
+    {0x02,0x01,0x02,0x04,0x02}, /* '~' */
+    {0x00,0x00,0x00,0x00,0x00}  /* DEL */
+};
+
+/* Low-level write command */
+static HAL_StatusTypeDef ssd1306_WriteCommand(uint8_t cmd)
+{
+    uint8_t buf[2];
+    buf[0] = SSD1306_CONTROL_CMD;
+    buf[1] = cmd;
+    return HAL_I2C_Master_Transmit(&SSD1306_I2C_HANDLE, SSD1306_I2C_ADDR8, buf, 2, SSD1306_I2C_TIMEOUT);
+}
+
+/* Low-level write data (chunks) */
+static HAL_StatusTypeDef ssd1306_WriteData(const uint8_t *data, size_t len)
+{
+    /* We'll send in chunks with control byte prepended for each chunk */
+    const size_t CHUNK_SIZE = 16; /* payload bytes per transfer (excluding control) */
+    uint8_t tx[CHUNK_SIZE + 1];
+    size_t idx = 0;
+    HAL_StatusTypeDef res = HAL_OK;
+
+    while (idx < len) {
+        size_t to_send = (len - idx) > CHUNK_SIZE ? CHUNK_SIZE : (len - idx);
+        tx[0] = SSD1306_CONTROL_DATA;
+        memcpy(&tx[1], &data[idx], to_send);
+        res = HAL_I2C_Master_Transmit(&SSD1306_I2C_HANDLE, SSD1306_I2C_ADDR8, tx, (uint16_t)(to_send + 1), SSD1306_I2C_TIMEOUT);
+        if (res != HAL_OK) return res;
+        idx += to_send;
+    }
+    return res;
+}
+
+/* Optional hardware reset */
+static void ssd1306_Reset(void)
+{
+#ifdef SSD1306_RST_GPIO_Port
+    HAL_GPIO_WritePin(SSD1306_RST_GPIO_Port, SSD1306_RST_Pin, GPIO_PIN_RESET);
+    HAL_Delay(10);
+    HAL_GPIO_WritePin(SSD1306_RST_GPIO_Port, SSD1306_RST_Pin, GPIO_PIN_SET);
+    HAL_Delay(10);
+#endif
+}
+
+/* Initialize the SSD1306 display */
+void SSD1306_Init(void)
+{
+    ssd1306_Reset();
+
+    /* Init sequence for 128x64 */
+    ssd1306_WriteCommand(0xAE); // Display off
+    ssd1306_WriteCommand(0x20); // Set Memory Addressing Mode
+    ssd1306_WriteCommand(0x00); // 0x00 Horizontal Addressing Mode
+    ssd1306_WriteCommand(0xB0); // Set Page Start Address for Page Addressing Mode
+    ssd1306_WriteCommand(0xC8); // COM Output Scan Direction remapped (C8)
+    ssd1306_WriteCommand(0x00); // Set low column address
+    ssd1306_WriteCommand(0x10); // Set high column address
+    ssd1306_WriteCommand(0x40); // Set start line address
+    ssd1306_WriteCommand(0x81); // Set contrast control
+    ssd1306_WriteCommand(0x7F);
+    ssd1306_WriteCommand(0xA1); // Segment re-map 127->0
+    ssd1306_WriteCommand(0xA6); // Normal display (A7 for inverse)
+    ssd1306_WriteCommand(0xA8); // Multiplex ratio
+    ssd1306_WriteCommand(0x3F); // 1/64 duty
+    ssd1306_WriteCommand(0xA4); // Output follows RAM content (A5: all on)
+    ssd1306_WriteCommand(0xD3); // Display offset
+    ssd1306_WriteCommand(0x00); // No offset
+    ssd1306_WriteCommand(0xD5); // Display clock divide ratio/oscillator freq
+    ssd1306_WriteCommand(0x80);
+    ssd1306_WriteCommand(0xD9); // Pre-charge period
+    ssd1306_WriteCommand(0xF1);
+    ssd1306_WriteCommand(0xDA); // COM pins hardware configuration
+    ssd1306_WriteCommand(0x12);
+    ssd1306_WriteCommand(0xDB); // VCOMH deselect level
+    ssd1306_WriteCommand(0x40);
+    ssd1306_WriteCommand(0x8D); // Charge pump setting
+    ssd1306_WriteCommand(0x14); // Enable charge pump
+    ssd1306_WriteCommand(0xAF); // Display ON
+
+    SSD1306_Clear();
+    SSD1306_UpdateScreen();
+}
+
+/* Update the entire screen from the framebuffer */
+void SSD1306_UpdateScreen(void)
+{
+    /* Use horizontal addressing: set column and page addressing and stream the buffer */
+    for (uint8_t page = 0; page < (SSD1306_HEIGHT / 8); page++) {
+        ssd1306_WriteCommand(0xB0 + page);      // set page start address
+        ssd1306_WriteCommand(0x00);             // set low column
+        ssd1306_WriteCommand(0x10);             // set high column
+
+        /* Each page has SSD1306_WIDTH bytes */
+        const uint8_t *ptr = &SSD1306_Buffer[SSD1306_WIDTH * page];
+        /* Send data in chunks */
+        ssd1306_WriteData(ptr, SSD1306_WIDTH);
+    }
+}
+
+/* Fill framebuffer with 0 or 1 */
+void SSD1306_Fill(uint8_t color)
+{
+    memset(SSD1306_Buffer, color ? 0xFF : 0x00, sizeof(SSD1306_Buffer));
+}
+
+/* Clear framebuffer */
+void SSD1306_Clear(void)
+{
+    SSD1306_Fill(0);
+}
+
+/* Draw a single pixel in the framebuffer */
+void SSD1306_DrawPixel(uint8_t x, uint8_t y, uint8_t color)
+{
+    if (x >= SSD1306_WIDTH || y >= SSD1306_HEIGHT) return;
+
+    uint16_t index = x + (y / 8) * SSD1306_WIDTH;
+    if (color)
+        SSD1306_Buffer[index] |=  (1 << (y & 7));
+    else
+        SSD1306_Buffer[index] &= ~(1 << (y & 7));
+}
+
+/* Draw a raw bitmap directly into framebuffer (expects SSD1306_WIDTH * SSD1306_HEIGHT / 8 bytes) */
+void SSD1306_DrawBitmap(const uint8_t *bitmap)
+{
+    memcpy(SSD1306_Buffer, bitmap, sizeof(SSD1306_Buffer));
+}
+
+/* Invert display (0 = normal, 1 = inverse) */
+void SSD1306_InvertDisplay(uint8_t invert)
+{
+    ssd1306_WriteCommand(invert ? 0xA7 : 0xA6);
+}
+
+/* Set contrast (0..255) */
+void SSD1306_SetContrast(uint8_t contrast)
+{
+    ssd1306_WriteCommand(0x81);
+    ssd1306_WriteCommand(contrast);
+}
+
+/* Write a single character (5x7) to framebuffer at pixel coordinates (x,y)
+   x: 0..(SSD1306_WIDTH-6) ; y: 0..(SSD1306_HEIGHT-8)
+*/
+void SSD1306_WriteChar(uint8_t x, uint8_t y, char ch, uint8_t color)
+{
+    if ((ch < 32) || (ch > 127)) ch = '?';
+    const uint8_t *bitmap = Font5x7[ch - 32];
+    for (uint8_t i = 0; i < 5; i++) {
+        uint8_t line = bitmap[i];
+        for (uint8_t j = 0; j < 8; j++) {
+            if (line & 0x01) {
+                SSD1306_DrawPixel(x + i, y + j, color);
+            } else {
+                SSD1306_DrawPixel(x + i, y + j, !color); /* optional background; change if undesired */
+            }
+            line >>= 1;
+        }
+    }
+    /* One column spacing */
+    for (uint8_t j = 0; j < 8; j++) {
+        SSD1306_DrawPixel(x + 5, y + j, !color);
+    }
+}
+
+/* Write a string (ASCII) using 5x7 font */
+void SSD1306_WriteString(uint8_t x, uint8_t y, const char* str, uint8_t color)
+{
+    while (*str) {
+        if (x + 6 > SSD1306_WIDTH) { /* wrap to next line */
+            x = 0;
+            y += 8;
+            if (y + 8 > SSD1306_HEIGHT) break; /* no more space */
+        }
+        SSD1306_WriteChar(x, y, *str, color);
+        x += 6;
+        str++;
+    }
+}
